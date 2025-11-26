@@ -3,7 +3,8 @@ import { View, Text, StyleSheet, ScrollView, TextInput, TouchableOpacity, Image,
 import { useSelector, useDispatch } from 'react-redux';
 import { updateUser } from '../../redux/slices/authSlice';
 import { doc, setDoc } from 'firebase/firestore';
-import { db } from '../../config/firebase';
+import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
+import { db, storage } from '../../config/firebase';
 import * as ImagePicker from 'expo-image-picker';
 import { LinearGradient } from 'expo-linear-gradient';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
@@ -25,7 +26,9 @@ export default function EditProfileScreen({ navigation }) {
   });
   
   const [profilePhoto, setProfilePhoto] = useState(user?.profilePhoto || 'https://via.placeholder.com/150');
+  const [localImageUri, setLocalImageUri] = useState(null);
   const [saving, setSaving] = useState(false);
+  const [uploadingPhoto, setUploadingPhoto] = useState(false);
 
   const updateField = (field, value) => {
     setFormData({ ...formData, [field]: value });
@@ -67,6 +70,7 @@ export default function EditProfileScreen({ navigation }) {
     });
 
     if (!result.canceled) {
+      setLocalImageUri(result.assets[0].uri);
       setProfilePhoto(result.assets[0].uri);
     }
   };
@@ -87,7 +91,40 @@ export default function EditProfileScreen({ navigation }) {
     });
 
     if (!result.canceled) {
+      setLocalImageUri(result.assets[0].uri);
       setProfilePhoto(result.assets[0].uri);
+    }
+  };
+
+  // 🔥 Upload image to Firebase Storage
+  const uploadImageToFirebase = async (uri) => {
+    try {
+      setUploadingPhoto(true);
+      console.log('📤 Uploading image to Firebase Storage...');
+      
+      // Convert URI to blob
+      const response = await fetch(uri);
+      const blob = await response.blob();
+      
+      // Create unique filename
+      const filename = `profile_photos/${user.id}_${Date.now()}.jpg`;
+      const storageRef = ref(storage, filename);
+      
+      // Upload to Firebase Storage
+      await uploadBytes(storageRef, blob);
+      console.log('✅ Image uploaded successfully');
+      
+      // Get download URL
+      const downloadURL = await getDownloadURL(storageRef);
+      console.log('🔗 Download URL:', downloadURL);
+      
+      setUploadingPhoto(false);
+      return downloadURL;
+      
+    } catch (error) {
+      console.error('❌ Error uploading image:', error);
+      setUploadingPhoto(false);
+      throw error;
     }
   };
 
@@ -99,18 +136,30 @@ export default function EditProfileScreen({ navigation }) {
 
     setSaving(true);
 
-    const updatedUser = {
-      ...user,
-      name: formData.name,
-      email: formData.email,
-      phone: formData.phone,
-      farmLocation: formData.farmLocation,
-      farmSize: parseFloat(formData.farmSize) || 0,
-      farmSizeUnit: formData.farmSizeUnit,
-      profilePhoto: profilePhoto,
-    };
-
     try {
+      let finalPhotoUrl = profilePhoto;
+      
+      // 🔥 If user selected a new local image, upload to Firebase
+      if (localImageUri) {
+        try {
+          finalPhotoUrl = await uploadImageToFirebase(localImageUri);
+        } catch (uploadError) {
+          console.error('Photo upload failed, using placeholder');
+          finalPhotoUrl = `https://ui-avatars.com/api/?name=${encodeURIComponent(formData.name)}&size=200&background=00704A&color=fff`;
+        }
+      }
+
+      const updatedUser = {
+        ...user,
+        name: formData.name,
+        email: formData.email,
+        phone: formData.phone,
+        farmLocation: formData.farmLocation,
+        farmSize: parseFloat(formData.farmSize) || 0,
+        farmSizeUnit: formData.farmSizeUnit,
+        profilePhoto: finalPhotoUrl,
+      };
+
       // ✅ Save to Firestore (cloud database)
       if (user?.id && user?.id !== 'admin') {
         await setDoc(doc(db, 'users', user.id), {
@@ -129,6 +178,8 @@ export default function EditProfileScreen({ navigation }) {
 
       // ✅ Save to Redux & AsyncStorage
       dispatch(updateUser(updatedUser));
+      setProfilePhoto(finalPhotoUrl);
+      setLocalImageUri(null);
       
       setSaving(false);
       Alert.alert(t('editProfile.success'), t('editProfile.profileUpdated'), [
@@ -162,9 +213,18 @@ export default function EditProfileScreen({ navigation }) {
             <View style={styles.editBadge}>
               <MaterialCommunityIcons name="camera" size={20} color={theme.colors.primary} />
             </View>
+            {localImageUri && (
+              <View style={styles.newPhotoBadge}>
+                <Text style={styles.newPhotoText}>NEW</Text>
+              </View>
+            )}
           </TouchableOpacity>
-          <Text style={styles.headerText}>{t('editProfile.tapToChange')}</Text>
-          <Text style={styles.headerSubtext}>{t('editProfile.cameraOrGallery')}</Text>
+          <Text style={styles.headerText}>
+            {localImageUri ? '📸 New photo selected' : t('editProfile.tapToChange')}
+          </Text>
+          <Text style={styles.headerSubtext}>
+            {localImageUri ? 'Will be uploaded when you save' : t('editProfile.cameraOrGallery')}
+          </Text>
         </LinearGradient>
 
         <View style={styles.form}>
@@ -256,10 +316,15 @@ export default function EditProfileScreen({ navigation }) {
           <TouchableOpacity 
             style={styles.saveButton} 
             onPress={handleSave}
-            disabled={saving}
+            disabled={saving || uploadingPhoto}
           >
-            {saving ? (
-              <ActivityIndicator color="#fff" />
+            {saving || uploadingPhoto ? (
+              <View style={styles.savingContainer}>
+                <ActivityIndicator color="#fff" />
+                <Text style={styles.savingText}>
+                  {uploadingPhoto ? 'Uploading photo...' : 'Saving...'}
+                </Text>
+              </View>
             ) : (
               <>
                 <MaterialCommunityIcons name="cloud-upload" size={20} color="#fff" />
@@ -271,7 +336,7 @@ export default function EditProfileScreen({ navigation }) {
           <TouchableOpacity 
             style={styles.cancelButton} 
             onPress={() => navigation.goBack()}
-            disabled={saving}
+            disabled={saving || uploadingPhoto}
           >
             <Text style={styles.cancelButtonText}>{t('editProfile.cancel')}</Text>
           </TouchableOpacity>
@@ -329,6 +394,20 @@ const styles = StyleSheet.create({
     borderWidth: 2,
     borderColor: theme.colors.primary,
     ...theme.spacing.shadowMedium,
+  },
+  newPhotoBadge: {
+    position: 'absolute',
+    top: -5,
+    right: -5,
+    backgroundColor: '#4CAF50',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 10,
+  },
+  newPhotoText: {
+    color: '#fff',
+    fontSize: 10,
+    fontWeight: 'bold',
   },
   headerText: { 
     fontSize: theme.fontSizes.md, 
@@ -409,6 +488,15 @@ const styles = StyleSheet.create({
     fontSize: theme.fontSizes.lg, 
     fontWeight: theme.fontWeights.bold,
     marginLeft: 8,
+  },
+  savingContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  savingText: {
+    color: '#fff',
+    fontSize: theme.fontSizes.md,
+    marginLeft: 10,
   },
   cancelButton: {
     backgroundColor: theme.colors.surfaceWarm,
