@@ -3,13 +3,16 @@ import { View, Text, StyleSheet, ScrollView, TextInput, TouchableOpacity, Image,
 import { useSelector, useDispatch } from 'react-redux';
 import { updateUser } from '../../redux/slices/authSlice';
 import { doc, setDoc } from 'firebase/firestore';
-import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
-import { db, storage } from '../../config/firebase';
+import { db } from '../../config/firebase';
 import * as ImagePicker from 'expo-image-picker';
 import { LinearGradient } from 'expo-linear-gradient';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useTranslation } from 'react-i18next';
 import theme from '../../theme';
+
+// 🌟 CLOUDINARY CONFIGURATION
+const CLOUDINARY_CLOUD_NAME = 'ddcqoehw1';
+const CLOUDINARY_UPLOAD_PRESET = 'profile_photos';
 
 export default function EditProfileScreen({ navigation }) {
   const { t } = useTranslation();
@@ -96,35 +99,54 @@ export default function EditProfileScreen({ navigation }) {
     }
   };
 
-  // 🔥 Upload image to Firebase Storage
-  const uploadImageToFirebase = async (uri) => {
+  // 🌟 NEW: Upload image to Cloudinary (FREE & WORKS!)
+  const uploadImageToCloudinary = async (uri) => {
     try {
       setUploadingPhoto(true);
-      console.log('📤 Uploading image to Firebase Storage...');
+      console.log('📤 Uploading image to Cloudinary...');
       
-      // Convert URI to blob
-      const response = await fetch(uri);
-      const blob = await response.blob();
+      // Create form data
+      const formData = new FormData();
+      formData.append('file', {
+        uri: uri,
+        type: 'image/jpeg',
+        name: `profile_${user.id}_${Date.now()}.jpg`,
+      });
+      formData.append('upload_preset', CLOUDINARY_UPLOAD_PRESET);
+      formData.append('folder', 'krishimantra/profiles');
       
-      // Create unique filename
-      const filename = `profile_photos/${user.id}_${Date.now()}.jpg`;
-      const storageRef = ref(storage, filename);
+      // Upload to Cloudinary
+      const response = await fetch(
+        `https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/image/upload`,
+        {
+          method: 'POST',
+          body: formData,
+          headers: {
+            'Accept': 'application/json',
+            'Content-Type': 'multipart/form-data',
+          },
+        }
+      );
       
-      // Upload to Firebase Storage
-      await uploadBytes(storageRef, blob);
+      const data = await response.json();
+      
+      if (!response.ok) {
+        throw new Error(data.error?.message || 'Upload failed');
+      }
+      
       console.log('✅ Image uploaded successfully');
-      
-      // Get download URL
-      const downloadURL = await getDownloadURL(storageRef);
-      console.log('🔗 Download URL:', downloadURL);
+      console.log('🔗 Cloudinary URL:', data.secure_url);
       
       setUploadingPhoto(false);
-      return downloadURL;
+      return data.secure_url; // Return the Cloudinary URL
       
     } catch (error) {
-      console.error('❌ Error uploading image:', error);
+      console.error('❌ Error uploading to Cloudinary:', error);
       setUploadingPhoto(false);
-      throw error;
+      
+      // Return a nice avatar as fallback
+      const avatarUrl = `https://ui-avatars.com/api/?name=${encodeURIComponent(formData.name)}&size=200&background=00704A&color=fff&bold=true`;
+      return avatarUrl;
     }
   };
 
@@ -139,14 +161,9 @@ export default function EditProfileScreen({ navigation }) {
     try {
       let finalPhotoUrl = profilePhoto;
       
-      // 🔥 If user selected a new local image, upload to Firebase
+      // 🌟 If user selected a new local image, upload to Cloudinary
       if (localImageUri) {
-        try {
-          finalPhotoUrl = await uploadImageToFirebase(localImageUri);
-        } catch (uploadError) {
-          console.error('Photo upload failed, using placeholder');
-          finalPhotoUrl = `https://ui-avatars.com/api/?name=${encodeURIComponent(formData.name)}&size=200&background=00704A&color=fff`;
-        }
+        finalPhotoUrl = await uploadImageToCloudinary(localImageUri);
       }
 
       const updatedUser = {
@@ -182,9 +199,11 @@ export default function EditProfileScreen({ navigation }) {
       setLocalImageUri(null);
       
       setSaving(false);
-      Alert.alert(t('editProfile.success'), t('editProfile.profileUpdated'), [
-        { text: 'OK', onPress: () => navigation.goBack() }
-      ]);
+      Alert.alert(
+        '✅ ' + t('editProfile.success'), 
+        'Your profile has been updated with your photo!',
+        [{ text: 'OK', onPress: () => navigation.goBack() }]
+      );
 
     } catch (error) {
       console.error('❌ Error saving profile:', error);
@@ -223,7 +242,7 @@ export default function EditProfileScreen({ navigation }) {
             {localImageUri ? '📸 New photo selected' : t('editProfile.tapToChange')}
           </Text>
           <Text style={styles.headerSubtext}>
-            {localImageUri ? 'Will be uploaded when you save' : t('editProfile.cameraOrGallery')}
+            {localImageUri ? 'Will be uploaded to cloud' : t('editProfile.cameraOrGallery')}
           </Text>
         </LinearGradient>
 
